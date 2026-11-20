@@ -75,7 +75,14 @@ data class ServerConfig(
     val pinEnabled: Boolean = false,
     val accessPin: String = "2468",
     val allowBrowserUploads: Boolean = true,
+    val coolMode: Boolean = false,
 )
+
+enum class ThermalLevel {
+    COOL,
+    WARM,
+    HOT,
+}
 
 data class NetworkInfo(
     val ipAddress: String? = null,
@@ -104,6 +111,7 @@ data class ServerState(
     val activeConnections: Int = 0,
     val totalDownloadsServed: Int = 0,
     val totalBytesServed: Long = 0L,
+    val thermalLevel: ThermalLevel = ThermalLevel.COOL,
     val lastError: String? = null,
 ) {
     val serverUrl: String?

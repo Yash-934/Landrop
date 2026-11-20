@@ -163,9 +163,9 @@ object WebPortalHtmlBuilder {
                 } else {
                     ""
                 }
-                // Offer 4-stream parallel Turbo downloader for files 4 MB .. 250 MB
-                val turboBtn = if (item.sizeBytes in (4L * 1024 * 1024)..(250L * 1024 * 1024)) {
-                    """<button class="btn btn-turbo" onclick="turboDownload('${item.id}', '${escapeJs(item.name)}', ${item.sizeBytes}, this)">⚡ Turbo 4×</button>"""
+                // Offer 2-stream parallel downloader (cool & fast) for medium files 8 MB .. 200 MB
+                val turboBtn = if (item.sizeBytes in (8L * 1024 * 1024)..(200L * 1024 * 1024)) {
+                    """<button class="btn btn-turbo" onclick="turboDownload('${item.id}', '${escapeJs(item.name)}', ${item.sizeBytes}, this)">⚡ Fast 2×</button>"""
                 } else {
                     ""
                 }
@@ -355,9 +355,9 @@ object WebPortalHtmlBuilder {
               <div class="wrap">
                 <header>
                   <div>
-                    <div class="live-pill"><span class="dot"></span>HIGH-SPEED LOCAL WI-FI SERVER</div>
+                    <div class="live-pill"><span class="dot"></span>LOCAL WI-FI SERVER</div>
                     <h1>$escapedTitle</h1>
-                    <p class="muted">${files.size} file(s) shared • $totalSize total • 1 MB TCP buffers + Parallel Range</p>
+                    <p class="muted">${files.size} file(s) shared • $totalSize total • Zero-copy LAN transfer</p>
                   </div>
                   <div class="header-actions">
                     <button class="btn btn-outline" onclick="window.location.reload()">Refresh</button>
@@ -397,17 +397,21 @@ object WebPortalHtmlBuilder {
                 async function turboDownload(id, fileName, totalSize, btn) {
                   const statusEl = document.getElementById('status-' + id);
                   btn.disabled = true;
-                  const streams = 4;
+                  const streams = 2;
                   const chunkSize = Math.ceil(totalSize / streams);
                   const loadedPerStream = new Array(streams).fill(0);
                   const startMs = performance.now();
+                  let lastUiUpdate = 0;
 
-                  function updateProgress() {
+                  function updateProgress(force) {
+                    const now = performance.now();
+                    if (!force && now - lastUiUpdate < 250) return;
+                    lastUiUpdate = now;
                     const loaded = loadedPerStream.reduce((a, b) => a + b, 0);
                     const pct = Math.min(100, Math.round((loaded / totalSize) * 100));
-                    const elapsedSec = Math.max(0.05, (performance.now() - startMs) / 1000);
+                    const elapsedSec = Math.max(0.05, (now - startMs) / 1000);
                     if (statusEl) {
-                      statusEl.textContent = '⚡ Turbo 4×: ' + pct + '% • ' + formatSpeed(loaded / elapsedSec);
+                      statusEl.textContent = '⚡ Fast 2×: ' + pct + '% • ' + formatSpeed(loaded / elapsedSec);
                     }
                   }
 
@@ -427,7 +431,7 @@ object WebPortalHtmlBuilder {
                         if (done) break;
                         chunks.push(value);
                         loadedPerStream[i] += value.byteLength;
-                        updateProgress();
+                        updateProgress(false);
                       }
                       return new Blob(chunks);
                     }));
@@ -444,12 +448,12 @@ object WebPortalHtmlBuilder {
                     const totalSec = Math.max(0.05, (performance.now() - startMs) / 1000);
                     if (statusEl) {
                       statusEl.style.color = '#00D2B4';
-                      statusEl.textContent = '✓ Saved via Turbo 4× • Avg ' + formatSpeed(totalSize / totalSec);
+                      statusEl.textContent = '✓ Saved via Fast 2× • Avg ' + formatSpeed(totalSize / totalSec);
                     }
                   } catch (err) {
                     if (statusEl) {
                       statusEl.style.color = '#FF8FA0';
-                      statusEl.textContent = 'Turbo failed (' + err.message + '), use regular Download.';
+                      statusEl.textContent = 'Fast mode failed (' + err.message + '), use regular Download.';
                     }
                   } finally {
                     btn.disabled = false;

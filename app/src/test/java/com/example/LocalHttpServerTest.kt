@@ -3,11 +3,13 @@ package com.example
 import com.example.model.FileCategory
 import com.example.model.ServerConfig
 import com.example.model.SharedFileItem
+import com.example.model.ThermalLevel
 import com.example.model.TransferLogEntry
 import com.example.server.FileStreamProvider
 import com.example.server.LocalHttpFileServer
 import com.example.server.ServerCallbacks
 import com.example.util.QrCodeGenerator
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -16,6 +18,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -112,6 +115,67 @@ class LocalHttpServerTest {
 
             assertNotNull(uploadedFile)
             assertEquals("Sent from laptop browser", uploadedFile!!.readText())
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun localHttpServerZeroCopyFileChannelFullAndRangeDownload() {
+        // 600 KB deterministic binary payload (> 256 KB ZERO_COPY_CHUNK_BYTES to exercise multi-chunk transferTo)
+        val payload = ByteArray(600 * 1024) { index -> ((index * 31 + 7) and 0xFF).toByte() }
+        val sourceFile = tempFolder.newFile("sample_video.bin")
+        sourceFile.writeBytes(payload)
+
+        val sharedItem = SharedFileItem(
+            id = "binfile1",
+            name = "sample_video.bin",
+            sizeBytes = payload.size.toLong(),
+            mimeType = "application/octet-stream",
+            category = FileCategory.OTHER,
+        )
+
+        var completedBytes = 0L
+        val receivedDir = tempFolder.newFolder("received_zc")
+        val server = LocalHttpFileServer(
+            configProvider = { ServerConfig(serverName = "ZeroCopyPhone", port = 0, coolMode = false) },
+            filesProvider = { listOf(sharedItem) },
+            streamProvider = object : FileStreamProvider {
+                override fun openInputStream(item: SharedFileItem): InputStream =
+                    FileInputStream(sourceFile)
+            },
+            receivedDir = receivedDir,
+            callbacks = object : ServerCallbacks {
+                override fun onActiveConnectionsChanged(count: Int) {}
+                override fun onTransferUpdated(entry: TransferLogEntry) {}
+                override fun onDownloadCompleted(fileId: String, bytesSent: Long) {
+                    completedBytes = bytesSent
+                }
+                override fun onFileReceived(file: File, originalName: String, mimeType: String, senderIp: String) {}
+            },
+            thermalLevelProvider = { ThermalLevel.COOL },
+        )
+
+        server.start(0)
+        val port = server.boundPort
+        try {
+            // 1. Full zero-copy download
+            val fullConn = URL("http://127.0.0.1:$port/download/binfile1").openConnection() as HttpURLConnection
+            assertEquals(200, fullConn.responseCode)
+            val fullBytes = fullConn.inputStream.use { it.readBytes() }
+            fullConn.disconnect()
+            assertArrayEquals(payload, fullBytes)
+            assertEquals(payload.size.toLong(), completedBytes)
+
+            // 2. Multi-chunk 206 byte range zero-copy download
+            val start = 100_000
+            val end = 399_999
+            val rangeConn = URL("http://127.0.0.1:$port/download/binfile1").openConnection() as HttpURLConnection
+            rangeConn.setRequestProperty("Range", "bytes=$start-$end")
+            assertEquals(206, rangeConn.responseCode)
+            val rangeBytes = rangeConn.inputStream.use { it.readBytes() }
+            rangeConn.disconnect()
+            assertArrayEquals(payload.copyOfRange(start, end + 1), rangeBytes)
         } finally {
             server.stop()
         }

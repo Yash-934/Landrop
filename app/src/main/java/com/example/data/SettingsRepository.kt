@@ -25,6 +25,7 @@ class SettingsRepository(private val context: Context) {
         val PIN_ENABLED = booleanPreferencesKey("pin_enabled")
         val ACCESS_PIN = stringPreferencesKey("access_pin")
         val ALLOW_UPLOADS = booleanPreferencesKey("allow_uploads")
+        val COOL_MODE = booleanPreferencesKey("cool_mode")
     }
 
     private val defaultServerName: String
@@ -40,6 +41,7 @@ class SettingsRepository(private val context: Context) {
             pinEnabled = prefs[Keys.PIN_ENABLED] ?: false,
             accessPin = prefs[Keys.ACCESS_PIN] ?: "2468",
             allowBrowserUploads = prefs[Keys.ALLOW_UPLOADS] ?: true,
+            coolMode = prefs[Keys.COOL_MODE] ?: false,
         )
     }
 
@@ -54,6 +56,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.PIN_ENABLED] = config.pinEnabled
             prefs[Keys.ACCESS_PIN] = validPin
             prefs[Keys.ALLOW_UPLOADS] = config.allowBrowserUploads
+            prefs[Keys.COOL_MODE] = config.coolMode
         }
     }
 }

@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -16,16 +15,27 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class FileServerService : Service() {
 
-    private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var serviceScope: CoroutineScope? = null
+    private var releaseJob: Job? = null
 
     companion object {
         private const val CHANNEL_ID = "landrop_server_channel"
         private const val NOTIFICATION_ID = 4102
-        private const val WAKE_LOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L // 2 hours safety cap
+        private const val ACTIVE_TRANSFER_WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L // 15 min max safety cap
+        private const val IDLE_RELEASE_DELAY_MS = 5_000L
         const val ACTION_START = "com.example.landrop.ACTION_START"
         const val ACTION_STOP = "com.example.landrop.ACTION_STOP"
 
@@ -55,12 +65,35 @@ class FileServerService : Service() {
         super.onCreate()
         ServerController.ensureInitialized(this)
         createNotificationChannel()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        serviceScope = scope
+
+        // Smart on-demand power management: hold CPU WakeLock ONLY during active transfers,
+        // release 5s after idle so CPU and Wi-Fi radio stay cool when no file is transferring.
+        scope.launch {
+            ServerController.serverState
+                .map { it.isRunning && it.activeConnections > 0 }
+                .distinctUntilChanged()
+                .collect { hasActiveTransfer ->
+                    if (hasActiveTransfer) {
+                        releaseJob?.cancel()
+                        releaseJob = null
+                        acquireActiveTransferWakeLock()
+                    } else {
+                        releaseJob?.cancel()
+                        releaseJob = launch {
+                            delay(IDLE_RELEASE_DELAY_MS)
+                            releaseWakeLock()
+                        }
+                    }
+                }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                releasePerformanceLocks()
+                releaseWakeLock()
                 ServerController.stopServer()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -70,7 +103,6 @@ class FileServerService : Service() {
             else -> {
                 val result = ServerController.startServer()
                 if (result.isSuccess) {
-                    acquirePerformanceLocks()
                     val notification = buildNotification()
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         startForeground(
@@ -82,7 +114,7 @@ class FileServerService : Service() {
                         startForeground(NOTIFICATION_ID, notification)
                     }
                 } else {
-                    releasePerformanceLocks()
+                    releaseWakeLock()
                     stopSelf()
                 }
             }
@@ -91,53 +123,33 @@ class FileServerService : Service() {
     }
 
     override fun onDestroy() {
-        releasePerformanceLocks()
+        releaseJob?.cancel()
+        serviceScope?.cancel()
+        serviceScope = null
+        releaseWakeLock()
         ServerController.stopServer()
         super.onDestroy()
     }
 
-    @Suppress("DEPRECATION")
-    private fun acquirePerformanceLocks() {
-        try {
-            if (wifiLock == null) {
-                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
-                wifiLock = wifiManager?.createWifiLock(mode, "LanDrop:HighSpeedWifiLock")?.apply {
-                    setReferenceCounted(false)
-                }
-            }
-            if (wifiLock?.isHeld == false) {
-                wifiLock?.acquire()
-            }
-        } catch (_: Exception) {
-        }
-
+    private fun acquireActiveTransferWakeLock() {
         try {
             if (wakeLock == null) {
                 val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
                 wakeLock = powerManager?.newWakeLock(
                     PowerManager.PARTIAL_WAKE_LOCK,
-                    "LanDrop:HighSpeedCpuLock",
+                    "LanDrop:ActiveTransferLock",
                 )?.apply {
                     setReferenceCounted(false)
                 }
             }
             if (wakeLock?.isHeld == false) {
-                wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS)
+                wakeLock?.acquire(ACTIVE_TRANSFER_WAKELOCK_TIMEOUT_MS)
             }
         } catch (_: Exception) {
         }
     }
 
-    private fun releasePerformanceLocks() {
-        try {
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        } catch (_: Exception) {
-        }
+    private fun releaseWakeLock() {
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (_: Exception) {
@@ -186,7 +198,7 @@ class FileServerService : Service() {
                 getString(R.string.notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Keeps the local Wi-Fi file server active at high speed while transferring files."
+                description = "Keeps the local Wi-Fi file server available while transferring files."
             }
             manager.createNotificationChannel(channel)
         }

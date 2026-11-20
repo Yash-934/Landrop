@@ -23,6 +23,7 @@ import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Tag
+import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -57,6 +58,7 @@ fun SettingsScreen(
     var pinEnabled by rememberSaveable { mutableStateOf(config.pinEnabled) }
     var accessPin by rememberSaveable { mutableStateOf(config.accessPin) }
     var allowUploads by rememberSaveable { mutableStateOf(config.allowBrowserUploads) }
+    var coolMode by rememberSaveable { mutableStateOf(config.coolMode) }
 
     LaunchedEffect(config) {
         serverName = config.serverName
@@ -64,6 +66,7 @@ fun SettingsScreen(
         pinEnabled = config.pinEnabled
         accessPin = config.accessPin
         allowUploads = config.allowBrowserUploads
+        coolMode = config.coolMode
     }
 
     val parsedPort = portText.toIntOrNull()
@@ -221,6 +224,41 @@ fun SettingsScreen(
                         modifier = Modifier.testTag("settings_uploads_switch"),
                     )
                 }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Thermostat,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Column {
+                            Text(
+                                text = stringResource(R.string.settings_cool_title),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = stringResource(R.string.settings_cool_subtitle),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = coolMode,
+                        onCheckedChange = { coolMode = it },
+                        modifier = Modifier.testTag("settings_cool_mode_switch"),
+                    )
+                }
             }
         }
 
@@ -234,6 +272,7 @@ fun SettingsScreen(
                             pinEnabled = pinEnabled,
                             accessPin = accessPin.ifBlank { "2468" },
                             allowBrowserUploads = allowUploads,
+                            coolMode = coolMode,
                         )
                     )
                 }

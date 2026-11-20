@@ -2,6 +2,7 @@ package com.example.server
 
 import com.example.model.ServerConfig
 import com.example.model.SharedFileItem
+import com.example.model.ThermalLevel
 import com.example.model.TransferDirection
 import com.example.model.TransferLogEntry
 import com.example.model.TransferStatus
@@ -18,16 +19,20 @@ import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.net.SocketException
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.nio.ByteBuffer
+import java.nio.channels.ClosedChannelException
+import java.nio.channels.ServerSocketChannel
+import java.nio.channels.SocketChannel
 import java.util.UUID
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
@@ -37,7 +42,7 @@ interface FileStreamProvider {
     fun openInputStream(item: SharedFileItem): InputStream?
 
     /**
-     * Opens a stream already positioned at [offsetBytes] using O(1) FileChannel seeking when possible.
+     * Opens a stream positioned at [offsetBytes] using O(1) FileChannel seeking when available.
      * Returns pair of (InputStream, alreadySeeked).
      */
     fun openInputStreamAt(item: SharedFileItem, offsetBytes: Long): Pair<InputStream, Boolean>? {
@@ -54,9 +59,10 @@ interface ServerCallbacks {
 }
 
 /**
- * High-throughput embedded HTTP/1.1 file server over ServerSocket + Coroutines.
- * Tuned for maximum LAN Wi-Fi speed: 1 MB TCP buffers, TCP_NODELAY, 512 KB zero-double-copy streaming,
- * O(1) FileChannel byte-range seeking for parallel multi-stream downloads, and uncompressed streaming ZIPs.
+ * Thermal-optimized embedded HTTP/1.1 file server over ServerSocketChannel + Coroutines.
+ * - Uses Linux kernel zero-copy FileChannel.transferTo() (sendfile) to minimize CPU load and heat.
+ * - Uses small 8 KB header buffers and L2-friendly 128 KB streaming buffers to avoid GC heat.
+ * - Caps concurrent heavy streams (max 2) and applies automatic thermal pacing if device warms up.
  */
 class LocalHttpFileServer(
     private val configProvider: () -> ServerConfig,
@@ -64,43 +70,51 @@ class LocalHttpFileServer(
     private val streamProvider: FileStreamProvider,
     private val receivedDir: File,
     private val callbacks: ServerCallbacks,
+    private val thermalLevelProvider: () -> ThermalLevel = { ThermalLevel.COOL },
 ) {
     companion object {
-        private const val SOCKET_BUFFER_BYTES = 1024 * 1024 // 1 MB TCP send/receive window
-        private const val STREAM_CHUNK_BYTES = 512 * 1024   // 512 KB transfer chunk size
+        private const val HEADER_BUFFER_BYTES = 8 * 1024    // 8 KB for HTTP request headers
+        private const val SOCKET_BUFFER_BYTES = 256 * 1024  // 256 KB balanced TCP window
+        private const val STREAM_CHUNK_BYTES = 128 * 1024   // 128 KB L2-cache-friendly chunk
+        private const val ZERO_COPY_CHUNK_BYTES = 256 * 1024L
+        private const val PROGRESS_EMIT_INTERVAL_MS = 800L
+        private const val MAX_CONCURRENT_TRANSFERS = 2
     }
 
-    private var serverSocket: ServerSocket? = null
+    private var serverChannel: ServerSocketChannel? = null
     private var scope: CoroutineScope? = null
     private var acceptJob: Job? = null
-    private val activeConnections = AtomicInteger(0)
+    private val activeTransfers = AtomicInteger(0)
+    private val transferSemaphore = Semaphore(MAX_CONCURRENT_TRANSFERS, true)
 
     val isRunning: Boolean
-        get() = serverSocket?.isClosed == false
+        get() = serverChannel?.isOpen == true
 
     val boundPort: Int
-        get() = serverSocket?.localPort ?: -1
+        get() = serverChannel?.socket()?.localPort ?: -1
 
     fun start(port: Int) {
         stop()
-        val socket = ServerSocket()
+        val channel = ServerSocketChannel.open()
+        channel.configureBlocking(true)
+        val socket = channel.socket()
         socket.reuseAddress = true
-        // Must be set before bind() so TCP window scaling negotiates a large window
         try {
             socket.receiveBufferSize = SOCKET_BUFFER_BYTES
-            socket.setPerformancePreferences(0, 1, 2) // Prioritize high bandwidth
         } catch (_: Exception) {
         }
-        socket.bind(InetSocketAddress(port), 64)
-        serverSocket = socket
+        channel.bind(InetSocketAddress(port), 32)
+        serverChannel = channel
 
         val serverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         scope = serverScope
         acceptJob = serverScope.launch {
-            while (isActive && !socket.isClosed) {
+            while (isActive && channel.isOpen) {
                 try {
-                    val client = socket.accept()
-                    serverScope.launch { handleClient(client) }
+                    val clientChannel = channel.accept()
+                    serverScope.launch { handleClient(clientChannel) }
+                } catch (_: ClosedChannelException) {
+                    break
                 } catch (_: SocketException) {
                     break
                 } catch (_: Exception) {
@@ -112,33 +126,33 @@ class LocalHttpFileServer(
 
     fun stop() {
         try {
-            serverSocket?.close()
+            serverChannel?.close()
         } catch (_: Exception) {
         }
-        serverSocket = null
+        serverChannel = null
         acceptJob?.cancel()
         acceptJob = null
         scope?.cancel()
         scope = null
-        activeConnections.set(0)
+        activeTransfers.set(0)
         callbacks.onActiveConnectionsChanged(0)
     }
 
-    private fun handleClient(socket: Socket) {
-        val count = activeConnections.incrementAndGet()
-        callbacks.onActiveConnectionsChanged(count)
+    private fun handleClient(clientChannel: SocketChannel) {
+        val socket = clientChannel.socket()
         val clientIp = socket.inetAddress?.hostAddress ?: "Unknown"
 
         try {
-            socket.soTimeout = 60_000
+            clientChannel.configureBlocking(true)
+            socket.soTimeout = 45_000
             try {
-                socket.tcpNoDelay = true
+                // Keep Nagle enabled (tcpNoDelay = false) to coalesce frames and reduce Wi-Fi radio interrupts
                 socket.sendBufferSize = SOCKET_BUFFER_BYTES
                 socket.receiveBufferSize = SOCKET_BUFFER_BYTES
             } catch (_: Exception) {
             }
 
-            val input = BufferedInputStream(socket.getInputStream(), STREAM_CHUNK_BYTES)
+            val input = BufferedInputStream(socket.getInputStream(), HEADER_BUFFER_BYTES)
             val rawOutput = socket.getOutputStream()
 
             val requestLine = readAsciiLine(input) ?: return
@@ -207,34 +221,44 @@ class LocalHttpFileServer(
 
                 (method == "GET" || method == "HEAD") && path.startsWith("/download/") -> {
                     val id = path.removePrefix("/download/")
-                    serveFile(
-                        fileId = id,
-                        headers = headers,
-                        output = rawOutput,
-                        clientIp = clientIp,
-                        inline = false,
-                        headOnly = method == "HEAD",
-                    )
+                    runWithTransferPermit {
+                        serveFile(
+                            fileId = id,
+                            headers = headers,
+                            clientChannel = clientChannel,
+                            output = rawOutput,
+                            clientIp = clientIp,
+                            inline = false,
+                            headOnly = method == "HEAD",
+                        )
+                    }
                 }
 
                 (method == "GET" || method == "HEAD") && path.startsWith("/preview/") -> {
                     val id = path.removePrefix("/preview/")
-                    serveFile(
-                        fileId = id,
-                        headers = headers,
-                        output = rawOutput,
-                        clientIp = clientIp,
-                        inline = true,
-                        headOnly = method == "HEAD",
-                    )
+                    runWithTransferPermit {
+                        serveFile(
+                            fileId = id,
+                            headers = headers,
+                            clientChannel = clientChannel,
+                            output = rawOutput,
+                            clientIp = clientIp,
+                            inline = true,
+                            headOnly = method == "HEAD",
+                        )
+                    }
                 }
 
                 method == "GET" && path == "/download-all.zip" -> {
-                    serveAllAsZip(rawOutput, clientIp)
+                    runWithTransferPermit {
+                        serveAllAsZip(rawOutput, clientIp)
+                    }
                 }
 
                 method == "POST" && path == "/upload" -> {
-                    handleUpload(config, queryParams, headers, input, rawOutput, clientIp)
+                    runWithTransferPermit {
+                        handleUpload(config, queryParams, headers, input, rawOutput, clientIp)
+                    }
                 }
 
                 method == "OPTIONS" -> {
@@ -251,17 +275,58 @@ class LocalHttpFileServer(
             // Client disconnected or network interrupted
         } finally {
             try {
-                socket.close()
+                clientChannel.close()
             } catch (_: Exception) {
             }
-            val remaining = activeConnections.decrementAndGet().coerceAtLeast(0)
+        }
+    }
+
+    private inline fun runWithTransferPermit(block: () -> Unit) {
+        transferSemaphore.acquire()
+        val active = activeTransfers.incrementAndGet()
+        callbacks.onActiveConnectionsChanged(active)
+        try {
+            block()
+        } finally {
+            val remaining = activeTransfers.decrementAndGet().coerceAtLeast(0)
             callbacks.onActiveConnectionsChanged(remaining)
+            transferSemaphore.release()
+        }
+    }
+
+    /**
+     * Gentle thermal pacing (bytes per second target) ONLY when user enabled Cool Mode
+     * or Android's thermal sensor reports the device is warming up.
+     */
+    private fun currentThermalPacingTargetBps(): Long {
+        val thermal = thermalLevelProvider()
+        val coolMode = configProvider().coolMode
+        return when {
+            thermal == ThermalLevel.HOT -> 6L * 1024 * 1024       // ~6 MB/s to let device cool down rapidly
+            thermal == ThermalLevel.WARM -> 12L * 1024 * 1024     // ~12 MB/s balanced cool pace
+            coolMode -> 14L * 1024 * 1024                         // ~14 MB/s eco-cool mode
+            else -> 0L                                            // Full uncapped zero-copy speed
+        }
+    }
+
+    private fun applyThermalPacingIfNeeded(bytesTransferred: Long, startTimeMs: Long) {
+        val targetBps = currentThermalPacingTargetBps()
+        if (targetBps <= 0L || bytesTransferred <= 0L) return
+        val expectedElapsedMs = (bytesTransferred * 1000L) / targetBps
+        val actualElapsedMs = System.currentTimeMillis() - startTimeMs
+        val sleepMs = expectedElapsedMs - actualElapsedMs
+        if (sleepMs in 4L..250L) {
+            try {
+                Thread.sleep(sleepMs)
+            } catch (_: InterruptedException) {
+            }
         }
     }
 
     private fun serveFile(
         fileId: String,
         headers: Map<String, String>,
+        clientChannel: SocketChannel,
         output: OutputStream,
         clientIp: String,
         inline: Boolean,
@@ -368,44 +433,91 @@ class LocalHttpFileServer(
         var sent = 0L
         try {
             rawStream.use { inputStream ->
-                if (startByte > 0L && !alreadySeeked) {
-                    skipFully(inputStream, startByte)
-                }
-                output.write(headerBlock.toByteArray(Charsets.UTF_8))
+                writeChannelFully(clientChannel, headerBlock.toByteArray(Charsets.UTF_8))
 
-                // Stream directly in 512 KB chunks without redundant BufferedOutputStream copying
-                val buffer = ByteArray(STREAM_CHUNK_BYTES)
                 var remaining = if (contentLength >= 0L) contentLength else Long.MAX_VALUE
                 var lastEmitTime = startTimeMs
+                var usedZeroCopy = false
 
-                while (remaining > 0L) {
-                    val toRead = minOf(buffer.size.toLong(), remaining).toInt()
-                    val read = inputStream.read(buffer, 0, toRead)
-                    if (read <= 0) break
-                    output.write(buffer, 0, read)
-                    sent += read
-                    if (contentLength >= 0L) remaining -= read
+                // Kernel zero-copy sendfile() path for real FileInputStream / ParcelFileDescriptor files
+                if (inputStream is FileInputStream && contentLength > 0L) {
+                    val fileChannel = inputStream.channel
+                    var filePos = startByte
+                    try {
+                        while (remaining > 0L) {
+                            val chunk = minOf(ZERO_COPY_CHUNK_BYTES, remaining)
+                            val transferred = fileChannel.transferTo(filePos, chunk, clientChannel)
+                            if (transferred <= 0L) {
+                                if (sent == 0L) break // Non-seekable pipe; fall back cleanly to stream copy
+                                break
+                            }
+                            usedZeroCopy = true
+                            filePos += transferred
+                            sent += transferred
+                            remaining -= transferred
 
-                    val now = System.currentTimeMillis()
-                    if (shouldTrack && now - lastEmitTime >= 300L) {
-                        lastEmitTime = now
-                        val elapsedMs = (now - startTimeMs).coerceAtLeast(1L)
-                        val speed = (sent * 1000L) / elapsedMs
-                        callbacks.onTransferUpdated(
-                            TransferLogEntry(
-                                id = transferId,
-                                fileName = item.name,
-                                clientIp = clientIp,
-                                direction = TransferDirection.DOWNLOAD,
-                                bytesTransferred = sent,
-                                totalBytes = trackedTotal,
-                                status = TransferStatus.IN_PROGRESS,
-                                speedBytesPerSec = speed,
-                            )
-                        )
+                            applyThermalPacingIfNeeded(sent, startTimeMs)
+
+                            val now = System.currentTimeMillis()
+                            if (shouldTrack && now - lastEmitTime >= PROGRESS_EMIT_INTERVAL_MS) {
+                                lastEmitTime = now
+                                val elapsedMs = (now - startTimeMs).coerceAtLeast(1L)
+                                callbacks.onTransferUpdated(
+                                    TransferLogEntry(
+                                        id = transferId,
+                                        fileName = item.name,
+                                        clientIp = clientIp,
+                                        direction = TransferDirection.DOWNLOAD,
+                                        bytesTransferred = sent,
+                                        totalBytes = trackedTotal,
+                                        status = TransferStatus.IN_PROGRESS,
+                                        speedBytesPerSec = (sent * 1000L) / elapsedMs,
+                                    )
+                                )
+                            }
+                        }
+                    } catch (_: Exception) {
+                        if (usedZeroCopy) throw RuntimeException("Client closed during zero-copy transfer")
+                        // Otherwise fall through to regular stream copy below
                     }
                 }
-                output.flush()
+
+                // Fallback stream copy (used for text notes or virtual non-seekable streams)
+                if (!usedZeroCopy && remaining > 0L) {
+                    if (startByte > 0L && !alreadySeeked) {
+                        skipFully(inputStream, startByte)
+                    }
+                    val buffer = ByteArray(STREAM_CHUNK_BYTES)
+                    while (remaining > 0L) {
+                        val toRead = minOf(buffer.size.toLong(), remaining).toInt()
+                        val read = inputStream.read(buffer, 0, toRead)
+                        if (read <= 0) break
+                        output.write(buffer, 0, read)
+                        sent += read
+                        if (contentLength >= 0L) remaining -= read
+
+                        applyThermalPacingIfNeeded(sent, startTimeMs)
+
+                        val now = System.currentTimeMillis()
+                        if (shouldTrack && now - lastEmitTime >= PROGRESS_EMIT_INTERVAL_MS) {
+                            lastEmitTime = now
+                            val elapsedMs = (now - startTimeMs).coerceAtLeast(1L)
+                            callbacks.onTransferUpdated(
+                                TransferLogEntry(
+                                    id = transferId,
+                                    fileName = item.name,
+                                    clientIp = clientIp,
+                                    direction = TransferDirection.DOWNLOAD,
+                                    bytesTransferred = sent,
+                                    totalBytes = trackedTotal,
+                                    status = TransferStatus.IN_PROGRESS,
+                                    speedBytesPerSec = (sent * 1000L) / elapsedMs,
+                                )
+                            )
+                        }
+                    }
+                    output.flush()
+                }
             }
 
             val totalElapsedMs = (System.currentTimeMillis() - startTimeMs).coerceAtLeast(1L)
@@ -479,9 +591,9 @@ class LocalHttpFileServer(
             val usedNames = mutableSetOf<String>()
             val bufferedOut = BufferedOutputStream(output, STREAM_CHUNK_BYTES)
             ZipOutputStream(bufferedOut).use { zip ->
-                // Level 0 (no compression) avoids CPU bottleneck so ZIP streams at full Wi-Fi speed
+                // Level 0 (no compression) avoids CPU heat and streams cleanly
                 zip.setLevel(Deflater.NO_COMPRESSION)
-                val buffer = ByteArray(256 * 1024)
+                val buffer = ByteArray(STREAM_CHUNK_BYTES)
                 for (item in files) {
                     val stream = openStreamForItem(item, 0L)?.first ?: continue
                     var entryName = FormatUtils.sanitizeFileName(item.name)
@@ -499,6 +611,7 @@ class LocalHttpFileServer(
                             if (read <= 0) break
                             zip.write(buffer, 0, read)
                             totalWritten += read
+                            applyThermalPacingIfNeeded(totalWritten, startTimeMs)
                         }
                     }
                     zip.closeEntry()
@@ -590,8 +703,10 @@ class LocalHttpFileServer(
                     received += read
                     remaining -= read
 
+                    applyThermalPacingIfNeeded(received, startTimeMs)
+
                     val now = System.currentTimeMillis()
-                    if (now - lastEmit >= 300L) {
+                    if (now - lastEmit >= PROGRESS_EMIT_INTERVAL_MS) {
                         lastEmit = now
                         val elapsedMs = (now - startTimeMs).coerceAtLeast(1L)
                         callbacks.onTransferUpdated(
@@ -656,6 +771,13 @@ class LocalHttpFileServer(
                 )
             )
             writeSimpleResponse(output, 500, "Internal Server Error", "Failed to save uploaded file")
+        }
+    }
+
+    private fun writeChannelFully(channel: SocketChannel, bytes: ByteArray) {
+        val buf = ByteBuffer.wrap(bytes)
+        while (buf.hasRemaining()) {
+            channel.write(buf)
         }
     }
 
@@ -772,7 +894,7 @@ class LocalHttpFileServer(
 
     private fun skipFully(input: InputStream, bytesToSkip: Long) {
         var remaining = bytesToSkip
-        val skipBuf = ByteArray(64 * 1024)
+        val skipBuf = ByteArray(32 * 1024)
         while (remaining > 0L) {
             val skipped = input.skip(remaining)
             if (skipped > 0L) {

@@ -6,6 +6,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
 import android.provider.OpenableColumns
 import com.example.data.SettingsRepository
 import com.example.model.FileCategory
@@ -13,6 +15,7 @@ import com.example.model.ReceivedFileItem
 import com.example.model.ServerConfig
 import com.example.model.ServerState
 import com.example.model.SharedFileItem
+import com.example.model.ThermalLevel
 import com.example.model.TransferLogEntry
 import com.example.util.FormatUtils
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +42,7 @@ object ServerController {
     private var settingsRepository: SettingsRepository? = null
     private var httpServer: LocalHttpFileServer? = null
     private var networkCallbackRegistered = false
+    private var thermalListenerRegistered = false
 
     private val _config = MutableStateFlow(ServerConfig())
     val config: StateFlow<ServerConfig> = _config.asStateFlow()
@@ -65,6 +69,7 @@ object ServerController {
 
         refreshNetworkInfo()
         registerNetworkMonitor(app)
+        registerThermalMonitor(app)
         reloadReceivedFiles(app)
 
         appScope.launch {
@@ -371,7 +376,27 @@ object ServerController {
                     _receivedFiles.update { listOf(item) + it }
                 }
             },
+            thermalLevelProvider = { _serverState.value.thermalLevel },
         )
+    }
+
+    private fun registerThermalMonitor(context: Context) {
+        if (thermalListenerRegistered || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        try {
+            fun mapStatus(status: Int): ThermalLevel = when {
+                status >= PowerManager.THERMAL_STATUS_SEVERE -> ThermalLevel.HOT
+                status >= PowerManager.THERMAL_STATUS_MODERATE -> ThermalLevel.WARM
+                else -> ThermalLevel.COOL
+            }
+
+            _serverState.update { it.copy(thermalLevel = mapStatus(pm.currentThermalStatus)) }
+            pm.addThermalStatusListener { status ->
+                _serverState.update { it.copy(thermalLevel = mapStatus(status)) }
+            }
+            thermalListenerRegistered = true
+        } catch (_: Exception) {
+        }
     }
 
     private fun registerNetworkMonitor(context: Context) {

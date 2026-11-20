@@ -69,6 +69,7 @@ import com.example.R
 import com.example.model.ServerConfig
 import com.example.model.ServerState
 import com.example.model.SharedFileItem
+import com.example.model.ThermalLevel
 import com.example.ui.components.PulsingStatusDot
 import com.example.ui.components.categoryIcon
 import com.example.ui.components.categoryTint
@@ -325,6 +326,36 @@ private fun ServerHeroCard(
                                 modifier = Modifier.size(20.dp),
                             )
                         }
+                    }
+                }
+
+                // Auto thermal guard banner when device warms up or Cool Mode is enabled
+                if (serverState.thermalLevel != ThermalLevel.COOL || config.coolMode) {
+                    val isHot = serverState.thermalLevel == ThermalLevel.HOT
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isHot) {
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.75f)
+                        } else {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = when {
+                                isHot -> "Auto Cooling Active: Phone is warm, pacing transfer speed to keep it cool."
+                                serverState.thermalLevel == ThermalLevel.WARM ->
+                                    "Thermal Guard Active: Smart pacing enabled to prevent heating."
+                                else -> "Cool Mode Enabled: Zero-copy eco pacing active for low heat."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isHot) {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            } else {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            },
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
                     }
                 }
 

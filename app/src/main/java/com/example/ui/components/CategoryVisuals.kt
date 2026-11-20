@@ -1,11 +1,5 @@
 package com.example.ui.components
 
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -19,7 +13,6 @@ import androidx.compose.material.icons.rounded.Notes
 import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -50,6 +43,10 @@ fun categoryTint(category: FileCategory): Color = when (category) {
     FileCategory.OTHER -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
+/**
+ * Energy-efficient status indicator dot with a soft static halo when live.
+ * Avoids continuous 60/120fps Compose infinite animations that keep GPU/display warm while idle.
+ */
 @Composable
 fun PulsingStatusDot(
     isLive: Boolean,
@@ -59,42 +56,22 @@ fun PulsingStatusDot(
     val activeColor = MaterialTheme.colorScheme.primary
     val idleColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
 
-    if (!isLive) {
-        Canvas(modifier = modifier.size(size)) {
-            drawCircle(color = idleColor, radius = this.size.minDimension * 0.34f)
-        }
-        return
-    }
-
-    val transition = rememberInfiniteTransition(label = "signal_pulse")
-    val pulseRadius by transition.animateFloat(
-        initialValue = 0.32f,
-        targetValue = 0.5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "pulse_radius",
-    )
-    val pulseAlpha by transition.animateFloat(
-        initialValue = 0.55f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "pulse_alpha",
-    )
-
     Canvas(modifier = modifier.size(size)) {
         val minDim = this.size.minDimension
-        drawCircle(
-            color = activeColor.copy(alpha = pulseAlpha),
-            radius = minDim * pulseRadius,
-        )
-        drawCircle(
-            color = activeColor,
-            radius = minDim * 0.28f,
-        )
+        if (isLive) {
+            drawCircle(
+                color = activeColor.copy(alpha = 0.24f),
+                radius = minDim * 0.48f,
+            )
+            drawCircle(
+                color = activeColor,
+                radius = minDim * 0.27f,
+            )
+        } else {
+            drawCircle(
+                color = idleColor,
+                radius = minDim * 0.30f,
+            )
+        }
     }
 }

@@ -1,0 +1,148 @@
+name: Android Release Build (APK & AAB)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      build_format:
+        description: 'Output format to build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - apk
+          - aab
+      run_tests:
+        description: 'Run unit tests before building release'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Signed Release APK & AAB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+
+      - name: Prepare debug keystore for unit tests
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests == true }}
+        run: |
+          if [ -f "debug.keystore.base64" ]; then
+            base64 --decode debug.keystore.base64 > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Run Unit Tests
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests == true }}
+        run: gradle :app:testDebugUnitTest
+
+      - name: Prepare Release Keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KEYSTORE_FILE="${{ github.workspace }}/my-upload-key.jks"
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$SECRET_STORE_PASSWORD" ] && [ -n "$SECRET_KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | tr -d '\n\r ' | base64 --decode > "$KEYSTORE_FILE"
+            echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$SECRET_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$SECRET_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "signed_with=production_secret" >> "$GITHUB_OUTPUT"
+            echo "Using production upload keystore from GitHub Secrets."
+          else
+            if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+              echo "::error::Missing GitHub Secrets (KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD) for tagged release."
+              exit 1
+            fi
+            echo "::warning::GitHub Secrets not configured yet. Generating a temporary self-signed release keystore for testing (do NOT upload this build to Play Store)."
+            TEMP_PASS=$(openssl rand -hex 16)
+            echo "::add-mask::$TEMP_PASS"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_FILE" \
+              -storepass "$TEMP_PASS" \
+              -alias upload \
+              -keypass "$TEMP_PASS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 365 \
+              -dname "CN=LanDrop Temp Release,O=LanDrop,C=IN"
+            echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$TEMP_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$TEMP_PASS" >> "$GITHUB_ENV"
+            echo "signed_with=temporary_test_key" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Signed Release APK
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_format == 'both' || inputs.build_format == 'apk' }}
+        run: gradle :app:assembleRelease
+
+      - name: Build Signed Release AAB (Play Store)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_format == 'both' || inputs.build_format == 'aab' }}
+        run: gradle :app:bundleRelease
+
+      - name: Clean up Keystore from Runner
+        if: always()
+        run: rm -f "${{ github.workspace }}/my-upload-key.jks"
+
+      - name: Upload Release APK Artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_format == 'both' || inputs.build_format == 'apk' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanDrop-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload Release AAB Artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_format == 'both' || inputs.build_format == 'aab' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanDrop-release-aab
+          path: app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub Release (On Tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab

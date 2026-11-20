@@ -49,6 +49,8 @@
     <string name="settings_pin_label">Access PIN</string>
     <string name="settings_uploads_title">Allow Browser Uploads</string>
     <string name="settings_uploads_subtitle">Let connected devices upload files back to this phone via browser</string>
+    <string name="settings_cool_title">Cool Mode (Anti-Heat)</string>
+    <string name="settings_cool_subtitle">Gentle transfer pacing to keep phone cool during large transfers</string>
     <string name="settings_save">Save Changes</string>
     <string name="settings_saved_toast">Settings saved</string>
     <string name="settings_guide_title">How Local Wi-Fi Sharing Works</string>
