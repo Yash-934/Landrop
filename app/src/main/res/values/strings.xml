@@ -1,0 +1,64 @@
+<resources>
+    <string name="app_name">LanDrop</string>
+    <string name="tab_share">Share</string>
+    <string name="tab_transfers">Transfers</string>
+    <string name="tab_settings">Settings</string>
+
+    <string name="server_status_online">SERVER LIVE</string>
+    <string name="server_status_offline">OFFLINE</string>
+    <string name="server_start">Start Local Server</string>
+    <string name="server_stop">Stop Server</string>
+    <string name="server_open_browser_hint">Open this address in any browser on the same Wi-Fi</string>
+    <string name="server_not_started_hint">Start the local server to generate your Wi-Fi download link</string>
+    <string name="server_no_wifi_warning">Connect to Wi-Fi or turn on Hotspot so other devices can reach your phone</string>
+
+    <string name="action_copy_url">Copy Link</string>
+    <string name="action_share_url">Share</string>
+    <string name="action_show_qr">QR Code</string>
+    <string name="action_pick_files">Any Files</string>
+    <string name="action_pick_media">Photos &amp; Videos</string>
+    <string name="action_add_text">Quick Text</string>
+    <string name="action_clear_all">Clear All</string>
+
+    <string name="section_shared_files">Shared Files</string>
+    <string name="empty_files_title">Ready to Beam Over Wi-Fi</string>
+    <string name="empty_files_subtitle">1. Pick any files or photos\n2. Start your local server\n3. Open the address in another device\'s browser to download</string>
+
+    <string name="qr_dialog_title">Scan to Open in Browser</string>
+    <string name="qr_dialog_subtitle">Make sure the other device is connected to the same Wi-Fi or Hotspot</string>
+    <string name="qr_dialog_close">Close</string>
+
+    <string name="quick_text_title">Share Text or Link</string>
+    <string name="quick_text_name_label">File name</string>
+    <string name="quick_text_body_label">Text content</string>
+    <string name="quick_text_add">Add to Server</string>
+    <string name="cancel">Cancel</string>
+
+    <string name="segment_received">Received</string>
+    <string name="segment_activity">Live Log</string>
+    <string name="received_empty_title">No Files Received Yet</string>
+    <string name="received_empty_subtitle">When Browser Uploads are enabled, other devices can send files right back to this phone from their browser.</string>
+    <string name="activity_empty_title">No Transfer Activity Yet</string>
+    <string name="activity_empty_subtitle">Downloads and uploads over your local Wi-Fi server will appear here in real time.</string>
+
+    <string name="settings_title">Server Settings</string>
+    <string name="settings_server_name">Server Name</string>
+    <string name="settings_port">Local Port</string>
+    <string name="settings_pin_title">Require 4-Digit PIN</string>
+    <string name="settings_pin_subtitle">Ask browsers for a PIN before viewing or downloading files</string>
+    <string name="settings_pin_label">Access PIN</string>
+    <string name="settings_uploads_title">Allow Browser Uploads</string>
+    <string name="settings_uploads_subtitle">Let connected devices upload files back to this phone via browser</string>
+    <string name="settings_save">Save Changes</string>
+    <string name="settings_saved_toast">Settings saved</string>
+    <string name="settings_guide_title">How Local Wi-Fi Sharing Works</string>
+    <string name="settings_guide_body">Both devices must be on the same Wi-Fi network (or connected to your phone\'s Mobile Hotspot). Files stream directly device-to-device at full LAN speed with zero internet data used.</string>
+
+    <string name="notification_channel_name">Local File Server</string>
+    <string name="notification_title">LanDrop Server Running</string>
+    <string name="notification_stop">Stop</string>
+
+    <string name="msg_url_copied">Server URL copied to clipboard</string>
+    <string name="msg_files_added">%1$d file(s) added</string>
+    <string name="msg_pin_copied">PIN copied</string>
+</resources>

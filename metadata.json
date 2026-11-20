@@ -1,0 +1,6 @@
+{
+  "name": "LanDrop",
+  "description": "Share any file over local Wi-Fi using a built-in HTTP server and download directly from any browser.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
