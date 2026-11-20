@@ -163,6 +163,12 @@ object WebPortalHtmlBuilder {
                 } else {
                     ""
                 }
+                // Offer 4-stream parallel Turbo downloader for files 4 MB .. 250 MB
+                val turboBtn = if (item.sizeBytes in (4L * 1024 * 1024)..(250L * 1024 * 1024)) {
+                    """<button class="btn btn-turbo" onclick="turboDownload('${item.id}', '${escapeJs(item.name)}', ${item.sizeBytes}, this)">⚡ Turbo 4×</button>"""
+                } else {
+                    ""
+                }
                 """
                 <article class="file-card" data-name="${safeName.lowercase()}">
                   <div class="file-meta">
@@ -170,10 +176,12 @@ object WebPortalHtmlBuilder {
                     <div class="file-info">
                       <div class="file-name" title="$safeName">$safeName</div>
                       <div class="file-sub">$sizeLabel • ${escapeHtml(item.mimeType)}</div>
+                      <div class="turbo-status" id="status-${item.id}"></div>
                     </div>
                   </div>
                   <div class="file-actions">
                     $previewBtn
+                    $turboBtn
                     <a class="btn btn-primary" href="/download/${item.id}">Download</a>
                   </div>
                 </article>
@@ -199,6 +207,7 @@ object WebPortalHtmlBuilder {
                   --muted: #94A3B8;
                   --teal: #00D2B4;
                   --cyan: #38BDF8;
+                  --amber: #FFB300;
                 }
                 body {
                   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -207,7 +216,7 @@ object WebPortalHtmlBuilder {
                   min-height: 100vh;
                   padding: 20px 16px 48px;
                 }
-                .wrap { max-width: 860px; margin: 0 auto; }
+                .wrap { max-width: 880px; margin: 0 auto; }
                 header {
                   background: var(--surface);
                   border: 1px solid var(--border);
@@ -285,22 +294,23 @@ object WebPortalHtmlBuilder {
                   font-weight: 700;
                   white-space: nowrap;
                 }
-                .file-info { min-width: 0; }
+                .file-info { min-width: 0; flex: 1; }
                 .file-name {
                   font-weight: 600;
                   font-size: 15px;
                   white-space: nowrap;
                   overflow: hidden;
                   text-overflow: ellipsis;
-                  max-width: 440px;
+                  max-width: 420px;
                 }
                 .file-sub { color: var(--muted); font-size: 12px; margin-top: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-                .file-actions { display: flex; gap: 8px; }
+                .turbo-status { color: var(--amber); font-size: 12px; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+                .file-actions { display: flex; gap: 8px; flex-wrap: wrap; }
                 .btn {
                   display: inline-flex;
                   align-items: center;
                   justify-content: center;
-                  padding: 9px 15px;
+                  padding: 9px 14px;
                   border-radius: 10px;
                   font-size: 13px;
                   font-weight: 700;
@@ -309,10 +319,12 @@ object WebPortalHtmlBuilder {
                   border: none;
                 }
                 .btn-primary { background: var(--teal); color: #00201B; }
+                .btn-turbo { background: rgba(255,179,0,0.16); color: var(--amber); border: 1px solid rgba(255,179,0,0.4); }
                 .btn-secondary { background: rgba(56,189,248,0.16); color: var(--cyan); border: 1px solid rgba(56,189,248,0.35); }
                 .btn-outline { background: transparent; color: var(--text); border: 1px solid var(--border); }
                 .btn-ghost { background: var(--surface-hi); color: var(--text); }
                 .btn:hover { filter: brightness(1.08); }
+                .btn:disabled { opacity: 0.55; cursor: wait; }
                 .upload-box {
                   margin-top: 22px;
                   background: var(--surface);
@@ -323,7 +335,7 @@ object WebPortalHtmlBuilder {
                 }
                 .upload-box.drag { border-color: var(--teal); background: rgba(0,210,180,0.06); }
                 .upload-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
-                .upload-status { margin-top: 12px; font-size: 13px; color: var(--teal); display: flex; flex-direction: column; gap: 6px; }
+                .upload-status { margin-top: 12px; font-size: 13px; color: var(--teal); display: flex; flex-direction: column; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
                 .empty {
                   background: var(--surface);
                   border: 1px solid var(--border);
@@ -343,9 +355,9 @@ object WebPortalHtmlBuilder {
               <div class="wrap">
                 <header>
                   <div>
-                    <div class="live-pill"><span class="dot"></span>LOCAL WI-FI SERVER</div>
+                    <div class="live-pill"><span class="dot"></span>HIGH-SPEED LOCAL WI-FI SERVER</div>
                     <h1>$escapedTitle</h1>
-                    <p class="muted">${files.size} file(s) shared • $totalSize total • Direct LAN transfer</p>
+                    <p class="muted">${files.size} file(s) shared • $totalSize total • 1 MB TCP buffers + Parallel Range</p>
                   </div>
                   <div class="header-actions">
                     <button class="btn btn-outline" onclick="window.location.reload()">Refresh</button>
@@ -376,6 +388,74 @@ object WebPortalHtmlBuilder {
                   });
                 }
 
+                function formatSpeed(bytesPerSec) {
+                  if (!bytesPerSec || bytesPerSec <= 0) return '0 MB/s';
+                  const mb = bytesPerSec / (1024 * 1024);
+                  return mb >= 1 ? mb.toFixed(1) + ' MB/s' : (bytesPerSec / 1024).toFixed(0) + ' KB/s';
+                }
+
+                async function turboDownload(id, fileName, totalSize, btn) {
+                  const statusEl = document.getElementById('status-' + id);
+                  btn.disabled = true;
+                  const streams = 4;
+                  const chunkSize = Math.ceil(totalSize / streams);
+                  const loadedPerStream = new Array(streams).fill(0);
+                  const startMs = performance.now();
+
+                  function updateProgress() {
+                    const loaded = loadedPerStream.reduce((a, b) => a + b, 0);
+                    const pct = Math.min(100, Math.round((loaded / totalSize) * 100));
+                    const elapsedSec = Math.max(0.05, (performance.now() - startMs) / 1000);
+                    if (statusEl) {
+                      statusEl.textContent = '⚡ Turbo 4×: ' + pct + '% • ' + formatSpeed(loaded / elapsedSec);
+                    }
+                  }
+
+                  try {
+                    const parts = await Promise.all(Array.from({ length: streams }, async (_, i) => {
+                      const start = i * chunkSize;
+                      const end = Math.min(totalSize - 1, start + chunkSize - 1);
+                      if (start > end) return new Uint8Array(0);
+                      const resp = await fetch('/download/' + id, {
+                        headers: { 'Range': 'bytes=' + start + '-' + end }
+                      });
+                      if (!resp.ok && resp.status !== 206) throw new Error('HTTP ' + resp.status);
+                      const reader = resp.body.getReader();
+                      const chunks = [];
+                      while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                        loadedPerStream[i] += value.byteLength;
+                        updateProgress();
+                      }
+                      return new Blob(chunks);
+                    }));
+
+                    const finalBlob = new Blob(parts);
+                    const blobUrl = URL.createObjectURL(finalBlob);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+                    const totalSec = Math.max(0.05, (performance.now() - startMs) / 1000);
+                    if (statusEl) {
+                      statusEl.style.color = '#00D2B4';
+                      statusEl.textContent = '✓ Saved via Turbo 4× • Avg ' + formatSpeed(totalSize / totalSec);
+                    }
+                  } catch (err) {
+                    if (statusEl) {
+                      statusEl.style.color = '#FF8FA0';
+                      statusEl.textContent = 'Turbo failed (' + err.message + '), use regular Download.';
+                    }
+                  } finally {
+                    btn.disabled = false;
+                  }
+                }
+
                 const uploadInput = document.getElementById('uploadInput');
                 const dropZone = document.getElementById('dropZone');
                 const uploadStatus = document.getElementById('uploadStatus');
@@ -386,6 +466,7 @@ object WebPortalHtmlBuilder {
                     const row = document.createElement('div');
                     row.textContent = 'Uploading ' + file.name + ' (0%)...';
                     uploadStatus.appendChild(row);
+                    const startMs = performance.now();
                     await new Promise((resolve) => {
                       const xhr = new XMLHttpRequest();
                       xhr.open('POST', '/upload?name=' + encodeURIComponent(file.name), true);
@@ -393,12 +474,14 @@ object WebPortalHtmlBuilder {
                       xhr.upload.onprogress = (e) => {
                         if (e.lengthComputable) {
                           const pct = Math.round((e.loaded / e.total) * 100);
-                          row.textContent = 'Uploading ' + file.name + ' (' + pct + '%)...';
+                          const elapsedSec = Math.max(0.05, (performance.now() - startMs) / 1000);
+                          row.textContent = 'Uploading ' + file.name + ' (' + pct + '% • ' + formatSpeed(e.loaded / elapsedSec) + ')';
                         }
                       };
                       xhr.onload = () => {
+                        const totalSec = Math.max(0.05, (performance.now() - startMs) / 1000);
                         if (xhr.status >= 200 && xhr.status < 300) {
-                          row.textContent = '✓ Sent ' + file.name + ' to phone';
+                          row.textContent = '✓ Sent ' + file.name + ' (' + formatSpeed(file.size / totalSec) + ')';
                         } else {
                           row.style.color = '#FF8FA0';
                           row.textContent = '✕ Failed to send ' + file.name + ' (HTTP ' + xhr.status + ')';
@@ -463,5 +546,14 @@ object WebPortalHtmlBuilder {
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&#39;")
+    }
+
+    private fun escapeJs(input: String): String {
+        return input
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\"", "\\\"")
+            .replace("\n", "")
+            .replace("\r", "")
     }
 }

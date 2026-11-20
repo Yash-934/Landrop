@@ -1,5 +1,10 @@
 package com.example.server
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
+import android.os.Build
 import com.example.model.NetworkInfo
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -13,14 +18,13 @@ object NetworkUtils {
         val priority: Int,
     )
 
-    fun detectLocalNetwork(): NetworkInfo {
+    fun detectLocalNetwork(context: Context? = null): NetworkInfo {
         val candidates = mutableListOf<Candidate>()
         try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
             for (iface in interfaces) {
                 if (!iface.isUp || iface.isLoopback || iface.isVirtual) continue
                 val name = iface.name.lowercase()
-                // Skip cellular, VPN, and dummy interfaces
                 if (
                     name.startsWith("rmnet") ||
                     name.startsWith("ccmni") ||
@@ -50,22 +54,50 @@ object NetworkUtils {
                 }
             }
         } catch (_: Exception) {
-            // Fall through to offline state
         }
 
         val best = candidates.maxByOrNull { it.priority }
-        return if (best != null) {
-            NetworkInfo(
-                ipAddress = best.ip,
-                interfaceLabel = best.label,
-                isConnected = true,
-            )
-        } else {
-            NetworkInfo(
+        if (best == null) {
+            return NetworkInfo(
                 ipAddress = null,
                 interfaceLabel = "No Wi-Fi / LAN",
                 isConnected = false,
             )
+        }
+
+        val (linkSpeed, freq) = if (best.label == "Wi-Fi" && context != null) {
+            readWifiRadioMetrics(context)
+        } else {
+            null to null
+        }
+
+        return NetworkInfo(
+            ipAddress = best.ip,
+            interfaceLabel = best.label,
+            isConnected = true,
+            linkSpeedMbps = linkSpeed,
+            frequencyMhz = freq,
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readWifiRadioMetrics(context: Context): Pair<Int?, Int?> {
+        return try {
+            var wifiInfo: WifiInfo? = null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+                wifiInfo = caps?.transportInfo as? WifiInfo
+            }
+            if (wifiInfo == null) {
+                val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                wifiInfo = wm?.connectionInfo
+            }
+            val speed = wifiInfo?.linkSpeed?.takeIf { it > 0 }
+            val freq = wifiInfo?.frequency?.takeIf { it > 0 }
+            speed to freq
+        } catch (_: Exception) {
+            null to null
         }
     }
 }

@@ -29,11 +29,21 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 interface FileStreamProvider {
     fun openInputStream(item: SharedFileItem): InputStream?
+
+    /**
+     * Opens a stream already positioned at [offsetBytes] using O(1) FileChannel seeking when possible.
+     * Returns pair of (InputStream, alreadySeeked).
+     */
+    fun openInputStreamAt(item: SharedFileItem, offsetBytes: Long): Pair<InputStream, Boolean>? {
+        val stream = openInputStream(item) ?: return null
+        return stream to false
+    }
 }
 
 interface ServerCallbacks {
@@ -44,8 +54,9 @@ interface ServerCallbacks {
 }
 
 /**
- * Pure-Kotlin embedded HTTP/1.1 file server over ServerSocket + Coroutines.
- * Supports GET, HEAD, POST uploads, HTTP byte ranges (206), streaming ZIP archives, and optional PIN cookies.
+ * High-throughput embedded HTTP/1.1 file server over ServerSocket + Coroutines.
+ * Tuned for maximum LAN Wi-Fi speed: 1 MB TCP buffers, TCP_NODELAY, 512 KB zero-double-copy streaming,
+ * O(1) FileChannel byte-range seeking for parallel multi-stream downloads, and uncompressed streaming ZIPs.
  */
 class LocalHttpFileServer(
     private val configProvider: () -> ServerConfig,
@@ -54,6 +65,11 @@ class LocalHttpFileServer(
     private val receivedDir: File,
     private val callbacks: ServerCallbacks,
 ) {
+    companion object {
+        private const val SOCKET_BUFFER_BYTES = 1024 * 1024 // 1 MB TCP send/receive window
+        private const val STREAM_CHUNK_BYTES = 512 * 1024   // 512 KB transfer chunk size
+    }
+
     private var serverSocket: ServerSocket? = null
     private var scope: CoroutineScope? = null
     private var acceptJob: Job? = null
@@ -69,7 +85,13 @@ class LocalHttpFileServer(
         stop()
         val socket = ServerSocket()
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress(port))
+        // Must be set before bind() so TCP window scaling negotiates a large window
+        try {
+            socket.receiveBufferSize = SOCKET_BUFFER_BYTES
+            socket.setPerformancePreferences(0, 1, 2) // Prioritize high bandwidth
+        } catch (_: Exception) {
+        }
+        socket.bind(InetSocketAddress(port), 64)
         serverSocket = socket
 
         val serverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -108,14 +130,21 @@ class LocalHttpFileServer(
         val clientIp = socket.inetAddress?.hostAddress ?: "Unknown"
 
         try {
-            socket.soTimeout = 30_000
-            val input = BufferedInputStream(socket.getInputStream(), 64 * 1024)
-            val output = BufferedOutputStream(socket.getOutputStream(), 64 * 1024)
+            socket.soTimeout = 60_000
+            try {
+                socket.tcpNoDelay = true
+                socket.sendBufferSize = SOCKET_BUFFER_BYTES
+                socket.receiveBufferSize = SOCKET_BUFFER_BYTES
+            } catch (_: Exception) {
+            }
+
+            val input = BufferedInputStream(socket.getInputStream(), STREAM_CHUNK_BYTES)
+            val rawOutput = socket.getOutputStream()
 
             val requestLine = readAsciiLine(input) ?: return
             val parts = requestLine.split(" ")
             if (parts.size < 2) {
-                writeSimpleResponse(output, 400, "Bad Request", "Malformed HTTP request")
+                writeSimpleResponse(rawOutput, 400, "Bad Request", "Malformed HTTP request")
                 return
             }
 
@@ -150,11 +179,11 @@ class LocalHttpFileServer(
                         append("Content-Length: 0\r\n")
                         append("Connection: close\r\n\r\n")
                     }
-                    output.write(headerBlock.toByteArray(Charsets.UTF_8))
-                    output.flush()
+                    rawOutput.write(headerBlock.toByteArray(Charsets.UTF_8))
+                    rawOutput.flush()
                 } else {
                     val html = WebPortalHtmlBuilder.buildPinGateHtml(config.serverName, hasError = true)
-                    writeHtmlResponse(output, 401, "Unauthorized", html)
+                    writeHtmlResponse(rawOutput, 401, "Unauthorized", html)
                 }
                 return
             }
@@ -162,10 +191,10 @@ class LocalHttpFileServer(
             // Enforce PIN if enabled
             if (config.pinEnabled && !isAuthorized(headers, queryParams, config.accessPin)) {
                 if (method == "POST") {
-                    writeSimpleResponse(output, 401, "Unauthorized", "PIN required")
+                    writeSimpleResponse(rawOutput, 401, "Unauthorized", "PIN required")
                 } else {
                     val html = WebPortalHtmlBuilder.buildPinGateHtml(config.serverName, hasError = false)
-                    writeHtmlResponse(output, 200, "OK", html)
+                    writeHtmlResponse(rawOutput, 200, "OK", html)
                 }
                 return
             }
@@ -173,7 +202,7 @@ class LocalHttpFileServer(
             when {
                 (method == "GET" || method == "HEAD") && (path == "/" || path == "/index.html") -> {
                     val html = WebPortalHtmlBuilder.buildPortalHtml(config, filesProvider())
-                    writeHtmlResponse(output, 200, "OK", html, headOnly = method == "HEAD")
+                    writeHtmlResponse(rawOutput, 200, "OK", html, headOnly = method == "HEAD")
                 }
 
                 (method == "GET" || method == "HEAD") && path.startsWith("/download/") -> {
@@ -181,7 +210,7 @@ class LocalHttpFileServer(
                     serveFile(
                         fileId = id,
                         headers = headers,
-                        output = output,
+                        output = rawOutput,
                         clientIp = clientIp,
                         inline = false,
                         headOnly = method == "HEAD",
@@ -193,7 +222,7 @@ class LocalHttpFileServer(
                     serveFile(
                         fileId = id,
                         headers = headers,
-                        output = output,
+                        output = rawOutput,
                         clientIp = clientIp,
                         inline = true,
                         headOnly = method == "HEAD",
@@ -201,21 +230,21 @@ class LocalHttpFileServer(
                 }
 
                 method == "GET" && path == "/download-all.zip" -> {
-                    serveAllAsZip(output, clientIp)
+                    serveAllAsZip(rawOutput, clientIp)
                 }
 
                 method == "POST" && path == "/upload" -> {
-                    handleUpload(config, queryParams, headers, input, output, clientIp)
+                    handleUpload(config, queryParams, headers, input, rawOutput, clientIp)
                 }
 
                 method == "OPTIONS" -> {
                     val response = "HTTP/1.1 204 No Content\r\nAllow: GET, HEAD, POST, OPTIONS\r\nConnection: close\r\n\r\n"
-                    output.write(response.toByteArray(Charsets.UTF_8))
-                    output.flush()
+                    rawOutput.write(response.toByteArray(Charsets.UTF_8))
+                    rawOutput.flush()
                 }
 
                 else -> {
-                    writeSimpleResponse(output, 404, "Not Found", "Resource not found on LanDrop server")
+                    writeSimpleResponse(rawOutput, 404, "Not Found", "Resource not found on LanDrop server")
                 }
             }
         } catch (_: Exception) {
@@ -310,15 +339,18 @@ class LocalHttpFileServer(
             return
         }
 
-        val rawStream = openStreamForItem(item)
-        if (rawStream == null) {
+        val streamPair = openStreamForItem(item, startByte)
+        if (streamPair == null) {
             writeSimpleResponse(output, 404, "Not Found", "Unable to read source file")
             return
         }
+        val (rawStream, alreadySeeked) = streamPair
 
         val transferId = UUID.randomUUID().toString()
         val trackedTotal = if (contentLength > 0L) contentLength else totalLength.coerceAtLeast(0L)
-        if (!inline || startByte == 0L) {
+        val shouldTrack = !inline || startByte == 0L
+        val startTimeMs = System.currentTimeMillis()
+        if (shouldTrack) {
             callbacks.onTransferUpdated(
                 TransferLogEntry(
                     id = transferId,
@@ -328,6 +360,7 @@ class LocalHttpFileServer(
                     bytesTransferred = 0L,
                     totalBytes = trackedTotal,
                     status = TransferStatus.IN_PROGRESS,
+                    speedBytesPerSec = 0L,
                 )
             )
         }
@@ -335,15 +368,15 @@ class LocalHttpFileServer(
         var sent = 0L
         try {
             rawStream.use { inputStream ->
-                if (startByte > 0L) {
+                if (startByte > 0L && !alreadySeeked) {
                     skipFully(inputStream, startByte)
                 }
                 output.write(headerBlock.toByteArray(Charsets.UTF_8))
-                output.flush()
 
-                val buffer = ByteArray(64 * 1024)
+                // Stream directly in 512 KB chunks without redundant BufferedOutputStream copying
+                val buffer = ByteArray(STREAM_CHUNK_BYTES)
                 var remaining = if (contentLength >= 0L) contentLength else Long.MAX_VALUE
-                var lastEmitTime = System.currentTimeMillis()
+                var lastEmitTime = startTimeMs
 
                 while (remaining > 0L) {
                     val toRead = minOf(buffer.size.toLong(), remaining).toInt()
@@ -354,8 +387,10 @@ class LocalHttpFileServer(
                     if (contentLength >= 0L) remaining -= read
 
                     val now = System.currentTimeMillis()
-                    if (now - lastEmitTime >= 250L) {
+                    if (shouldTrack && now - lastEmitTime >= 300L) {
                         lastEmitTime = now
+                        val elapsedMs = (now - startTimeMs).coerceAtLeast(1L)
+                        val speed = (sent * 1000L) / elapsedMs
                         callbacks.onTransferUpdated(
                             TransferLogEntry(
                                 id = transferId,
@@ -365,6 +400,7 @@ class LocalHttpFileServer(
                                 bytesTransferred = sent,
                                 totalBytes = trackedTotal,
                                 status = TransferStatus.IN_PROGRESS,
+                                speedBytesPerSec = speed,
                             )
                         )
                     }
@@ -372,32 +408,39 @@ class LocalHttpFileServer(
                 output.flush()
             }
 
-            callbacks.onTransferUpdated(
-                TransferLogEntry(
-                    id = transferId,
-                    fileName = item.name,
-                    clientIp = clientIp,
-                    direction = TransferDirection.DOWNLOAD,
-                    bytesTransferred = sent,
-                    totalBytes = maxOf(trackedTotal, sent),
-                    status = TransferStatus.COMPLETED,
+            val totalElapsedMs = (System.currentTimeMillis() - startTimeMs).coerceAtLeast(1L)
+            val avgSpeed = (sent * 1000L) / totalElapsedMs
+            if (shouldTrack) {
+                callbacks.onTransferUpdated(
+                    TransferLogEntry(
+                        id = transferId,
+                        fileName = item.name,
+                        clientIp = clientIp,
+                        direction = TransferDirection.DOWNLOAD,
+                        bytesTransferred = sent,
+                        totalBytes = maxOf(trackedTotal, sent),
+                        status = TransferStatus.COMPLETED,
+                        speedBytesPerSec = avgSpeed,
+                    )
                 )
-            )
+            }
             if (!inline) {
                 callbacks.onDownloadCompleted(item.id, sent)
             }
         } catch (_: Exception) {
-            callbacks.onTransferUpdated(
-                TransferLogEntry(
-                    id = transferId,
-                    fileName = item.name,
-                    clientIp = clientIp,
-                    direction = TransferDirection.DOWNLOAD,
-                    bytesTransferred = sent,
-                    totalBytes = trackedTotal,
-                    status = TransferStatus.FAILED,
+            if (shouldTrack) {
+                callbacks.onTransferUpdated(
+                    TransferLogEntry(
+                        id = transferId,
+                        fileName = item.name,
+                        clientIp = clientIp,
+                        direction = TransferDirection.DOWNLOAD,
+                        bytesTransferred = sent,
+                        totalBytes = trackedTotal,
+                        status = TransferStatus.FAILED,
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -415,10 +458,10 @@ class LocalHttpFileServer(
             append("Connection: close\r\n\r\n")
         }
         output.write(headerBlock.toByteArray(Charsets.UTF_8))
-        output.flush()
 
         val transferId = UUID.randomUUID().toString()
         val estTotal = files.sumOf { it.sizeBytes.coerceAtLeast(0L) }
+        val startTimeMs = System.currentTimeMillis()
         callbacks.onTransferUpdated(
             TransferLogEntry(
                 id = transferId,
@@ -434,10 +477,13 @@ class LocalHttpFileServer(
         var totalWritten = 0L
         try {
             val usedNames = mutableSetOf<String>()
-            ZipOutputStream(output).use { zip ->
-                val buffer = ByteArray(32 * 1024)
+            val bufferedOut = BufferedOutputStream(output, STREAM_CHUNK_BYTES)
+            ZipOutputStream(bufferedOut).use { zip ->
+                // Level 0 (no compression) avoids CPU bottleneck so ZIP streams at full Wi-Fi speed
+                zip.setLevel(Deflater.NO_COMPRESSION)
+                val buffer = ByteArray(256 * 1024)
                 for (item in files) {
-                    val stream = openStreamForItem(item) ?: continue
+                    val stream = openStreamForItem(item, 0L)?.first ?: continue
                     var entryName = FormatUtils.sanitizeFileName(item.name)
                     var counter = 1
                     while (!usedNames.add(entryName)) {
@@ -459,6 +505,7 @@ class LocalHttpFileServer(
                 }
                 zip.finish()
             }
+            val elapsedMs = (System.currentTimeMillis() - startTimeMs).coerceAtLeast(1L)
             callbacks.onTransferUpdated(
                 TransferLogEntry(
                     id = transferId,
@@ -468,6 +515,7 @@ class LocalHttpFileServer(
                     bytesTransferred = totalWritten,
                     totalBytes = maxOf(estTotal, totalWritten),
                     status = TransferStatus.COMPLETED,
+                    speedBytesPerSec = (totalWritten * 1000L) / elapsedMs,
                 )
             )
             callbacks.onDownloadCompleted("zip-bundle", totalWritten)
@@ -515,6 +563,7 @@ class LocalHttpFileServer(
         val targetFile = uniqueTargetFile(receivedDir, cleanName)
 
         val transferId = UUID.randomUUID().toString()
+        val startTimeMs = System.currentTimeMillis()
         callbacks.onTransferUpdated(
             TransferLogEntry(
                 id = transferId,
@@ -529,10 +578,10 @@ class LocalHttpFileServer(
 
         var received = 0L
         try {
-            FileOutputStream(targetFile).use { fos ->
-                val buffer = ByteArray(64 * 1024)
+            BufferedOutputStream(FileOutputStream(targetFile), STREAM_CHUNK_BYTES).use { fos ->
+                val buffer = ByteArray(STREAM_CHUNK_BYTES)
                 var remaining = contentLength
-                var lastEmit = System.currentTimeMillis()
+                var lastEmit = startTimeMs
                 while (remaining > 0L) {
                     val toRead = minOf(buffer.size.toLong(), remaining).toInt()
                     val read = input.read(buffer, 0, toRead)
@@ -542,8 +591,9 @@ class LocalHttpFileServer(
                     remaining -= read
 
                     val now = System.currentTimeMillis()
-                    if (now - lastEmit >= 250L) {
+                    if (now - lastEmit >= 300L) {
                         lastEmit = now
+                        val elapsedMs = (now - startTimeMs).coerceAtLeast(1L)
                         callbacks.onTransferUpdated(
                             TransferLogEntry(
                                 id = transferId,
@@ -553,6 +603,7 @@ class LocalHttpFileServer(
                                 bytesTransferred = received,
                                 totalBytes = contentLength,
                                 status = TransferStatus.IN_PROGRESS,
+                                speedBytesPerSec = (received * 1000L) / elapsedMs,
                             )
                         )
                     }
@@ -561,6 +612,7 @@ class LocalHttpFileServer(
             }
 
             if (received == contentLength) {
+                val totalElapsedMs = (System.currentTimeMillis() - startTimeMs).coerceAtLeast(1L)
                 callbacks.onTransferUpdated(
                     TransferLogEntry(
                         id = transferId,
@@ -570,6 +622,7 @@ class LocalHttpFileServer(
                         bytesTransferred = received,
                         totalBytes = contentLength,
                         status = TransferStatus.COMPLETED,
+                        speedBytesPerSec = (received * 1000L) / totalElapsedMs,
                     )
                 )
                 callbacks.onFileReceived(targetFile, targetFile.name, mimeType, clientIp)
@@ -606,11 +659,13 @@ class LocalHttpFileServer(
         }
     }
 
-    private fun openStreamForItem(item: SharedFileItem): InputStream? {
+    private fun openStreamForItem(item: SharedFileItem, offsetBytes: Long): Pair<InputStream, Boolean>? {
         if (item.textContent != null) {
-            return ByteArrayInputStream(item.textContent.toByteArray(Charsets.UTF_8))
+            val bytes = item.textContent.toByteArray(Charsets.UTF_8)
+            val safeOffset = offsetBytes.coerceIn(0L, bytes.size.toLong()).toInt()
+            return ByteArrayInputStream(bytes, safeOffset, bytes.size - safeOffset) to true
         }
-        return streamProvider.openInputStream(item)
+        return streamProvider.openInputStreamAt(item, offsetBytes)
     }
 
     private fun uniqueTargetFile(dir: File, name: String): File {
@@ -717,7 +772,7 @@ class LocalHttpFileServer(
 
     private fun skipFully(input: InputStream, bytesToSkip: Long) {
         var remaining = bytesToSkip
-        val skipBuf = ByteArray(16 * 1024)
+        val skipBuf = ByteArray(64 * 1024)
         while (remaining > 0L) {
             val skipped = input.skip(remaining)
             if (skipped > 0L) {

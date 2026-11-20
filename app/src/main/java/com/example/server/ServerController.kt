@@ -88,7 +88,7 @@ object ServerController {
     }
 
     fun refreshNetworkInfo() {
-        val info = NetworkUtils.detectLocalNetwork()
+        val info = NetworkUtils.detectLocalNetwork(appContext)
         _serverState.update { it.copy(networkInfo = info) }
     }
 
@@ -296,6 +296,28 @@ object ServerController {
                     } catch (_: Exception) {
                         null
                     }
+                }
+
+                override fun openInputStreamAt(
+                    item: SharedFileItem,
+                    offsetBytes: Long,
+                ): Pair<InputStream, Boolean>? {
+                    val uri = item.uri ?: return null
+                    // Prefer ParcelFileDescriptor + FileChannel for fast kernel reads & O(1) range seeking
+                    try {
+                        val pfd = resolver.openFileDescriptor(uri, "r")
+                        if (pfd != null) {
+                            val fis = android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                            if (offsetBytes > 0L) {
+                                fis.channel.position(offsetBytes)
+                            }
+                            return fis to true
+                        }
+                    } catch (_: Exception) {
+                        // Fall back to standard ContentResolver InputStream
+                    }
+                    val stream = openInputStream(item) ?: return null
+                    return stream to false
                 }
             },
             receivedDir = getReceivedDir(context),

@@ -271,11 +271,15 @@ private fun ServerHeroCard(
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .padding(start = 8.dp),
                     ) {
                         Surface(
                             shape = CircleShape,
                             color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.weight(1f, fill = false),
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -297,9 +301,15 @@ private fun ServerHeroCard(
                                     modifier = Modifier.size(15.dp),
                                 )
                                 Text(
-                                    text = serverState.networkInfo.interfaceLabel,
+                                    text = buildString {
+                                        append(serverState.networkInfo.interfaceLabel)
+                                        serverState.networkInfo.bandLabel?.let { append(" • $it") }
+                                        serverState.networkInfo.linkSpeedMbps?.let { append(" • ${it} Mbps") }
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -315,6 +325,22 @@ private fun ServerHeroCard(
                                 modifier = Modifier.size(20.dp),
                             )
                         }
+                    }
+                }
+
+                // Helpful 5 GHz speed tip when device is on 2.4 GHz Wi-Fi
+                if (serverState.networkInfo.isSlow24GhzBand) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = "Tip: 2.4 GHz Wi-Fi caps around 8–10 MB/s. Switch to 5 GHz Wi-Fi or 5 GHz Hotspot for 40–100+ MB/s.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
                     }
                 }
 

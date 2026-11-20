@@ -8,8 +8,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
@@ -17,9 +19,13 @@ import com.example.R
 
 class FileServerService : Service() {
 
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
     companion object {
         private const val CHANNEL_ID = "landrop_server_channel"
         private const val NOTIFICATION_ID = 4102
+        private const val WAKE_LOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L // 2 hours safety cap
         const val ACTION_START = "com.example.landrop.ACTION_START"
         const val ACTION_STOP = "com.example.landrop.ACTION_STOP"
 
@@ -30,7 +36,6 @@ class FileServerService : Service() {
             try {
                 ContextCompat.startForegroundService(context, intent)
             } catch (_: Exception) {
-                // Fallback if foreground service launch is restricted
                 ServerController.ensureInitialized(context)
                 ServerController.startServer()
             }
@@ -55,6 +60,7 @@ class FileServerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                releasePerformanceLocks()
                 ServerController.stopServer()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -64,6 +70,7 @@ class FileServerService : Service() {
             else -> {
                 val result = ServerController.startServer()
                 if (result.isSuccess) {
+                    acquirePerformanceLocks()
                     val notification = buildNotification()
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         startForeground(
@@ -75,6 +82,7 @@ class FileServerService : Service() {
                         startForeground(NOTIFICATION_ID, notification)
                     }
                 } else {
+                    releasePerformanceLocks()
                     stopSelf()
                 }
             }
@@ -83,8 +91,57 @@ class FileServerService : Service() {
     }
 
     override fun onDestroy() {
+        releasePerformanceLocks()
         ServerController.stopServer()
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquirePerformanceLocks() {
+        try {
+            if (wifiLock == null) {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wifiManager?.createWifiLock(mode, "LanDrop:HighSpeedWifiLock")?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            if (wakeLock == null) {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = powerManager?.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "LanDrop:HighSpeedCpuLock",
+                )?.apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun releasePerformanceLocks() {
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {
+        }
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Exception) {
+        }
     }
 
     private fun buildNotification(): Notification {
@@ -129,7 +186,7 @@ class FileServerService : Service() {
                 getString(R.string.notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Keeps the local Wi-Fi file server active while transferring files."
+                description = "Keeps the local Wi-Fi file server active at high speed while transferring files."
             }
             manager.createNotificationChannel(channel)
         }

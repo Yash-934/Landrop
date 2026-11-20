@@ -56,6 +56,7 @@ data class TransferLogEntry(
     val bytesTransferred: Long,
     val totalBytes: Long,
     val status: TransferStatus,
+    val speedBytesPerSec: Long = 0L,
     val timestampMillis: Long = System.currentTimeMillis(),
 ) {
     val progress: Float
@@ -80,7 +81,21 @@ data class NetworkInfo(
     val ipAddress: String? = null,
     val interfaceLabel: String = "Offline",
     val isConnected: Boolean = false,
-)
+    val linkSpeedMbps: Int? = null,
+    val frequencyMhz: Int? = null,
+) {
+    val bandLabel: String?
+        get() = when (val freq = frequencyMhz) {
+            null -> null
+            in 2400..2500 -> "2.4 GHz"
+            in 4900..5900 -> "5 GHz"
+            in 5925..7125 -> "6 GHz"
+            else -> null
+        }
+
+    val isSlow24GhzBand: Boolean
+        get() = frequencyMhz != null && frequencyMhz in 2400..2500
+}
 
 data class ServerState(
     val isRunning: Boolean = false,

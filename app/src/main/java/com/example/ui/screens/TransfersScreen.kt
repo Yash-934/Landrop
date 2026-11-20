@@ -338,7 +338,12 @@ private fun TransferLogCard(log: TransferLogEntry) {
             }
 
             Text(
-                text = "${FormatUtils.formatBytes(log.bytesTransferred)} / ${FormatUtils.formatBytes(log.totalBytes)}",
+                text = buildString {
+                    append("${FormatUtils.formatBytes(log.bytesTransferred)} / ${FormatUtils.formatBytes(log.totalBytes)}")
+                    if (log.speedBytesPerSec > 0L) {
+                        append(" • ${FormatUtils.formatBytes(log.speedBytesPerSec)}/s")
+                    }
+                },
                 fontFamily = MonoFontFamily,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
